@@ -1,0 +1,27 @@
+# History files
+*.Rhistory
+*.Rapp.history
+
+# Session Data files
+*.RData
+
+# R Markdown output
+*.html
+*.pdf
+*.png
+
+# Generated Data files
+*.rds
+*.nc
+*.RData
+
+# Downloaded Data files
+*.txt
+*.zip
+*.fcs
+*.tsv
+
+# Annoying DS_Store files from Mac
+*.DS_Store
+
+
