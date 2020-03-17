@@ -1,0 +1,552 @@
+---
+title: Analysis of 6-hour timecourse mass cytometry data with `cydar`
+author: Arianne Richard and Claire Ma, with some code adapted from Aaron Lun
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Overview
+
+This script will analyze mass cytometry data comparing CD8+ T cell signalling responses to ligands of differing potencies. The aim is to look for changes in population abundance of different TCR signalling proteins upon treatment with different TCR ligands, using methods from the cydar package.
+See `README.md` for instructions on how to obtain the data and prepare it for analysis.
+
+# Loading the data
+
+First we load in the data.
+This is done using the ncdfFlow package, which provides facilities for rapidly loading FCS files into memory.
+
+```{r}
+library(ncdfFlow)
+fnames<-list.files(path = 'data',pattern = '*.fcs',full.names=TRUE)
+ncdf<-read.ncdfFlowSet(files = fnames)
+```
+
+We double-check the identities of the channels and we identify the subset of channels that were actually used.
+
+```{r}
+channels <- data.frame(channel=colnames(ncdf), 
+    marker=parameters(ncdf[[1]])$desc, 
+    stringsAsFactors=FALSE)
+channels
+in.use <- grepl("^[0-9]+[A-Za-z]+_", channels$marker)
+channels[in.use,]
+```
+
+We also read in the sample annotations.
+
+```{r}
+samples <- read.table('data/samples.txt', 
+    sep='\t', header=TRUE, stringsAsFactors=FALSE)
+samples
+```
+
+# Transforming the data
+
+We use the "logicle" transform (https://www.ncbi.nlm.nih.gov/pubmed/16604519), which provides linearity at zero and logarithmic behaviour at large intensities.
+
+Note that we only compute transformations for the channels that actually contain marker intensities (and a couple others that we'll use during gating).
+
+```{r}
+in.use.2 <- in.use
+in.use.2[grepl('Ce14', colnames(ncdf))] <- TRUE
+in.use.2[grepl('Event', colnames(ncdf))] <- TRUE
+
+library(cydar)
+
+ncdf <- ncdf[,in.use.2]
+lgcl<-logicleTransform(w=0.1,t=10000) 
+trans<-transformList(colnames(ncdf),lgcl)
+processed <- transform(ncdf, trans)
+nrow(ncdf[[2]])
+nrow(processed[[2]])
+```
+
+# Normalising the data
+
+For this experiment, cells from 2 separate biological replicates were activated with the same peptide+time stimulation conditions. Cells from each biological replicate were barcoded and multiplexed together in a staining tube. Two conditions from each biological replicate were included in both their own staining tube and the staining tube of the other biological replicate to allow for normalization. We will normalize the batches based on these four technical replicates to remove any subtle batch effects between different staining tubes. We will use `normalizeBatch` to range-normalize the data. We include the argument to fix zero measurements at zero to prevent any artefacts of negative numbers or null measurements gaining small values.
+
+To this end, we group the transformed samples by staining tube and normalize.  
+
+```{r}
+processed.a<-processed[grep('_A_', rownames(phenoData(processed)))]
+processed.b<-processed[grep('_B_', rownames(phenoData(processed)))]
+
+allMice.x<-list(processed.a, processed.b)
+
+rownames(samples) <- samples$FCS.File.Name
+
+batch.comp<-lapply(allMice.x, function(x) {
+  factor(paste0(samples[rownames(phenoData(x)), 'Condition'], '_',
+              samples[rownames(phenoData(x)), 'Time.Point'], 'h_', 
+              samples[rownames(phenoData(x)), 'Rep']))
+})
+batch.comp
+
+processed_norm<-normalizeBatch(allMice.x, batch.comp,
+                               mode='range', p=0.001, fix.zero = TRUE)
+
+```
+
+We check the data compared with pre-normalisation.
+
+ECDF plots of two samples that should be directly aligned:
+
+```{r}
+for(i in 1:length(which(in.use.2))){
+  par(mfrow=c(1,2))
+  
+  chann <- channels[in.use.2, 'channel'][i]
+  
+  plot(ecdf(exprs(allMice.x[[1]][[3]])[,chann]), col="blue", 
+       main=channels[in.use.2, 'marker'][i])
+  plot(ecdf(exprs(allMice.x[[2]][[3]])[,chann]), add=TRUE, col="red")
+
+  plot(ecdf(processed_norm[[1]][[3]][,chann]), col="blue", 
+       main=paste0(channels[in.use.2, 'marker'][i], " range-normalized"))
+  plot(ecdf(processed_norm[[2]][[3]][,chann]), add=TRUE, col="red")
+}
+```
+
+ECDF plots of two samples that should be similar:
+
+```{r}
+for(i in 1:length(which(in.use.2))){
+  par(mfrow=c(1,2))
+  
+  chann <- channels[in.use.2, 'channel'][i]
+  
+  plot(ecdf(exprs(allMice.x[[1]][[5]])[,chann]), col="blue", 
+       main=channels[in.use.2, 'marker'][i])
+  plot(ecdf(exprs(allMice.x[[2]][[5]])[,chann]), add=TRUE, col="red")
+
+  plot(ecdf(processed_norm[[1]][[5]][,chann]), col="blue", 
+       main=paste0(channels[in.use.2, 'marker'][i], " range-normalized"))
+  plot(ecdf(processed_norm[[2]][[5]][,chann]), add=TRUE, col="red")
+}
+```
+
+And histograms of those that should be directly aligned:
+
+```{r}
+for(i in 1:length(which(in.use.2))){
+  
+  par(mfrow=c(1,2), bty='o')
+  chann <- channels[in.use.2, 'channel'][i]
+  
+  ha1<-exprs(allMice.x[[1]][[3]])[,chann]
+  hb1<-exprs(allMice.x[[2]][[3]])[,chann]
+  
+  ha2<-processed_norm[[1]][[3]][,chann]
+  hb2<-processed_norm[[2]][[3]][,chann]
+  
+  bre <- seq(from=-1, to=6, length.out=70)
+  
+  hist(ha1, col = rgb(1,0.9,0,1), breaks=bre, xlim = c(0,5),
+       main="Before", xlab=channels[in.use.2, 'marker'][i])
+  hist(hb1,col = rgb(0,0,1,0.5), add=T, breaks=bre)
+ 
+  hist(ha2, col = rgb(1,0.9,0,1), breaks=bre, xlim = c(0,5),
+       main="Range", xlab=channels[in.use.2, 'marker'][i])
+  hist(hb2,col = rgb(0,0,1,0.5), add=T, breaks=bre)
+}
+```
+
+And histograms of those that should be similar:
+
+```{r}
+for(i in 1:length(which(in.use.2))){
+  
+  par(mfrow=c(1,2), bty='o')
+  chann <- channels[in.use.2, 'channel'][i]
+  
+  ha1<-exprs(allMice.x[[1]][[5]])[,chann]
+  hb1<-exprs(allMice.x[[2]][[5]])[,chann]
+  
+  ha2<-processed_norm[[1]][[5]][,chann]
+  hb2<-processed_norm[[2]][[5]][,chann]
+  
+  hist(ha1, col = rgb(1,0.9,0,1), breaks=bre, xlim = c(0,5),
+       main="Before", xlab=channels[in.use.2, 'marker'][i])
+  hist(hb1,col = rgb(0,0,1,0.5),breaks=bre,add=T)
+ 
+  hist(ha2, col = rgb(1,0.9,0,1), breaks=bre, xlim = c(0,5),
+       main="Range", xlab=channels[in.use.2, 'marker'][i])
+  hist(hb2,col = rgb(0,0,1,0.5),breaks=bre,add=T)
+}
+```
+
+This normalization appears to have done a decent job. We can therefore unlist the samples to return the normalised samples that are a list of matrices. Finally we turn the data back into a flowSet for further processing. We also reduce the dataset to include only one technical replicate from each of the Unstimulated and N4 2h conditions to have only one technical replicate per biological sample in the analysis.
+
+```{r}
+lapply(processed_norm, names)
+samples
+processed_norm[[1]] <- processed_norm[[1]][!names(processed_norm[[1]]) %in% c('c02_SAMPLE_A_01_1_0.fcs', 'c04_SAMPLE_A_01_1_0.fcs')]
+processed_norm[[2]] <- processed_norm[[2]][!names(processed_norm[[2]]) %in% c('c01_SAMPLE_B_01_1_0.fcs', 'c03_SAMPLE_B_01_1_0.fcs')]
+
+processed_unlist<-unlist(processed_norm,recursive = FALSE)
+
+frames <- lapply(processed_unlist, function(x) {new("flowFrame", exprs=x)})
+
+processed <- as(frames, "flowSet")
+processed <- ncdfFlowSet(processed)
+
+```
+
+Now we can move on to the gating.
+
+# Defining gates for quality control
+
+First we want to pool the cells to estimate global gating strategies.
+
+```{r}
+proc.ff <- poolCells(processed, equalize=FALSE)
+```
+
+## Removing residual EQ beads
+
+We should remove any residual EQ beads from the data.
+
+We'll use the pooled samples to determine where to place the gate using 2 channels that were not used for antibody markers.
+
+```{r}
+smoothScatter(exprs(proc.ff)[,"Ce140Di"], exprs(proc.ff)[,"Ce142Di"],
+    xlab="Ce140", ylab="Ce142")
+bead.gate <- rectangleGate(filterId="beadgate", list("Ce140Di"=c(3.2, Inf), "Ce142Di"=c(2, Inf)))
+smoothScatter(exprs(proc.ff)[,"Ce140Di"], exprs(proc.ff)[,"Ce142Di"],
+    xlab='Ce140', ylab='Ce142')
+abline(v=bead.gate@min['Ce140Di'], col="red")
+abline(h=bead.gate@min['Ce142Di'], col="red")
+bead.filt <- filter(proc.ff, bead.gate)
+proc.ff <- Subset(proc.ff, !bead.filt)
+nrow(proc.ff)
+```
+
+## Removing aberrant events with excess length
+
+This will flag some multiplets and should be removed.
+
+```{r}
+hist(exprs(proc.ff)[,"Event_length"], breaks=200, xlab='Event length', main='')
+length.gate <- rectangleGate(filterId="lengthgate", list("Event_length"=c(0, 1.83)))
+hist(exprs(proc.ff)[,"Event_length"], breaks=200, xlab='Event length', main='')
+abline(v=length.gate@max, col="red")
+proc.ff <- Subset(proc.ff, length.gate)
+hist(exprs(proc.ff)[,"Event_length"], breaks=200, xlab='Event length', main='')
+nrow(proc.ff)
+```
+
+## Removing dying cells or high multiplets
+
+We can use the DNA markers to gate for cells. cydar has implemented a DNA gate option that aims to select primary or secondary modalities in 2 DNA dimensions of the data. However, this looked a bit loose and we want a really tight gate against the doublets, so we'll use a manual gate.
+
+```{r}
+smoothScatter(exprs(proc.ff)[,"Ir191Di"], exprs(proc.ff)[,"Ir193Di"], 
+    xlab="DNA1", ylab="DNA2") 
+
+DNA.gate <- rectangleGate(filterId="dnagate", list("Ir191Di"=c(2.75, 3.22), "Ir193Di"=c(3.0, 3.5)))
+
+hist(exprs(proc.ff)[,"Ir191Di"], breaks=200, xlab='DNA', main='')
+abline(v=DNA.gate@min['Ir191Di'], col='red')
+abline(v=DNA.gate@max['Ir191Di'], col='red')
+
+hist(exprs(proc.ff)[,"Ir193Di"], breaks=200, xlab='DNA', main='')
+abline(v=DNA.gate@min['Ir193Di'], col='red')
+abline(v=DNA.gate@max['Ir193Di'], col='red')
+
+
+proc.ff <- Subset(proc.ff, DNA.gate)
+nrow(proc.ff)
+smoothScatter(exprs(proc.ff)[,"Ir191Di"], exprs(proc.ff)[,"Ir193Di"], 
+    xlab="DNA1", ylab="DNA2") 
+
+```
+
+## Removing dead cells
+
+This experiment was stained with cisplatin to mark the dead cells. 
+We exclude dead cells as `Pt195Di` high.
+
+```{r}
+hist(exprs(proc.ff)[,"Pt195Di"], breaks=200, xlab='Pt195', ylim=c(0,100000), main='')
+dead.gate <- rectangleGate(filterId="deadgate", list("Pt195Di"=c(0, 1.3)))
+hist(exprs(proc.ff)[,"Pt195Di"], breaks=200, xlab='Pt195', main='')
+abline(v=dead.gate@max, col="red")
+proc.ff <- Subset(proc.ff, dead.gate)
+hist(exprs(proc.ff)[,"Pt195Di"], breaks=200, xlab='Pt195', main='')
+nrow(proc.ff)
+```
+
+## Gating for specific cells of interest
+
+We next remove non-T cells by excluding cells with low expression of TCRb.
+
+We gate out those 5 MAD below the median because TCR levels can fall dramatically in activating cells and we don't want to miss these. 
+(Also, we started with primarily CD8+ T cells in the live fraction by experimental design and expect the fraction of non-T cells to be low.)
+
+```{r}
+hist(exprs(proc.ff)[,"Tm169Di"], breaks=200, xlab='TcRb', main='')
+t.gate <- outlierGate(proc.ff, 'Tm169Di', nmads=5, type='lower')
+abline(v=t.gate@min, col="red")
+proc.ff <- Subset(proc.ff, t.gate)
+
+hist(exprs(proc.ff)[,"Tm169Di"], breaks=200, xlab='TcRb', main='')
+nrow(proc.ff)
+```
+
+Finally, we remove non-CD8+ cells.
+
+Again we gate out those 5 MAD below the median because CD8 expression can also drop dramatically with activation. 
+
+```{r}
+hist(exprs(proc.ff)[,"Nd146Di"], breaks=200, xlab='CD8a', main='')
+CD8.gate <- outlierGate(proc.ff, 'Nd146Di', nmads=5, type='lower')
+abline(v=CD8.gate@min, col="red")
+proc.ff <- Subset(proc.ff, CD8.gate)
+
+hist(exprs(proc.ff)[,"Nd146Di"], breaks=200, xlab='CD8a', main='')
+nrow(proc.ff)
+```
+
+# Gating the individual samples
+
+Now we'll apply these same gates to the individual samples. 
+
+First we'll remove the residual EQ beads and plot one sample from each batch (different conditions) to check the gating has worked.
+
+```{r}
+bead.filt <- filter(processed, bead.gate)
+processed <- split(processed, bead.filt)["beadgate-"][[1]]
+plot(exprs(processed[[2]])[,"Ce140Di"], exprs(processed[[2]])[,"Ce142Di"],
+    xlab="Ce140", ylab="Ce142")
+plot(exprs(processed[[22]])[,"Ce140Di"], exprs(processed[[22]])[,"Ce142Di"],
+    xlab="Ce140", ylab="Ce142")
+
+```
+
+Next we remove events with excess length and plot two samples.
+
+```{r}
+processed <- Subset(processed, length.gate)
+hist(exprs(processed[[2]])[,"Event_length"], breaks=50, xlab='Event length', main='')
+hist(exprs(processed[[22]])[,"Event_length"], breaks=50, xlab='Event length', main='')
+
+```
+
+Next we remove the cells with undesirable DNA content. We'll visualize two of the samples to check the gating has gone to plan.
+
+```{r}
+processed <- Subset(processed, DNA.gate)
+
+smoothScatter(exprs(processed[[2]])[,"Ir191Di"], exprs(processed[[2]])[,"Ir193Di"], 
+    xlab="DNA1", ylab="DNA2") 
+smoothScatter(exprs(processed[[22]])[,"Ir191Di"], exprs(processed[[22]])[,"Ir193Di"], 
+    xlab="DNA1", ylab="DNA2") 
+```
+
+This isn't perfect - there seems to be a slight shift in the iridium staining between batched even after normalization, but we appear to have been able to successfully gate out the doublets in both batches, so it should be fine for downstream analyses.
+
+And we gate out the dead cells.
+
+```{r}
+processed <- Subset(processed, dead.gate)
+hist(exprs(processed[[2]])[,"Pt195Di"], breaks=50, xlab='Pt195', main='')
+hist(exprs(processed[[22]])[,"Pt195Di"], breaks=50, xlab='Pt195', main='')
+
+```
+
+And the TCRb+ gate.
+
+```{r}
+processed <- Subset(processed, t.gate)
+hist(exprs(processed[[2]])[,"Tm169Di"], breaks=50, xlab='TCRb', main='')
+hist(exprs(processed[[22]])[,"Tm169Di"], breaks=50, xlab='TCRb', main='')
+
+```
+
+And the CD8+ gate.
+
+```{r}
+processed <- Subset(processed, CD8.gate)
+hist(exprs(processed[[2]])[,"Nd146Di"], breaks=50, xlab='CD8a', main='')
+hist(exprs(processed[[22]])[,"Nd146Di"], breaks=50, xlab='CD8a', main='')
+
+```
+
+
+# Performing a differential abundance analysis
+
+## Narrowing to markers of signalling and activation
+
+We restrict our analysis to the markers of interest.
+We include some of the markers we filtered on because changes in expression of these can correspond to activation status and can be interesting.
+However, we want to get rid of bead intensities, DNA content, live/dead, etc. that are not of interest beyond quality control.
+For the following analysis, we are only going to be looking at signalling and activation markers, not baseline expression of signalling proteins, so we will exclude those as well.
+
+```{r}
+## true.names replacement from Aaron Lun
+true.names <- with(channels, marker[match(colnames(processed), channel)])
+true.names <- sub("^[0-9]+[A-Za-z]+_", "", true.names)
+colnames(processed) <- as.character(true.names)
+colnames(processed) 
+
+processed <- processed[,colnames(processed) %in% c('pSTAT5', 'pAKT', 'pSLP76', 'pLCK', 'IkBa', 'pPLCg1', 'pERK1_2', 'pZAP70_SYK', 'pS6', 'CD8a', 'CD44', 'CD25', 'TCRb', 'CD45')]
+colnames(processed)
+```
+
+
+## Downsampling the cells within each sample
+
+cydar is very powerful but can take an extremely long time to run with large numbers of cells. Let's check how many cells we have per sample before we decide to move ahead with running cydar. 
+
+```{r}
+n_events <- vector('numeric', length(processed))
+for(i in 1:length(processed)){
+  n_events[i] <- nrow(processed[[i]])
+  print(dim(processed[[i]]))
+}
+```
+
+Let's downsample to the minimum number of cells per sample.
+
+```{r}
+min(n_events)
+set.seed(100)
+processed <- ncfsApply(processed, function(x){x[sample(1:nrow(x@exprs), min(n_events), replace=FALSE)]})
+```
+
+## Counting cells into hyperspheres
+
+We compute the distances to neighbouring cells. 
+The aim here is to determine whether the default size of our hyperspheres (`tol=0.5`) will contain enough cells for statistical modelling.
+
+```{r}
+cd <- prepareCellData(processed)
+dist <- neighborDistances(cd)
+boxplot(dist, xlab="Number of neighbors", ylab="Tolerance")
+abline(h=0.5, col="red", lwd=2, lty=2)
+```
+
+There appear to be many more than 50 cells per hypersphere using this radius tolerance. This is perhaps not terribly surprising because we have a group of cells that are fairly homogenous in expression of many markers. Let's drop the tolerance to try to get a bit better resolution.
+
+```{r}
+boxplot(dist, xlab="Number of neighbors", ylab="Tolerance")
+abline(h=0.4, col="red", lwd=2, lty=2)
+```
+
+The majority of hyperspheres still have more than 50 cells at this tolerance but with a smaller radius, we are less likely to have hyperspheres that encompass the whole experiment, and so this should be fine.
+
+We now count cells into hyperspheres.
+Each hypersphere basically describes a region of the expression space, centred on a cell and including neighbouring cells from any sample.  
+Here, we downsampled our selection to centre hyperspheres on 1/200 of total cells. This still provides nearly 2,000 hyperspheres.
+
+```{r}
+set.seed(100)
+cd <- countCells(cd, tol=0.4, downsample=200)
+cd
+```
+
+The count matrix contains the number of cells from each sample (column) in each hypersphere (row) and the intensity matrix contains the median intensity of each hypersphere (row) for each marker (column)
+
+```{r}
+head(assay(cd, "counts"))
+hist(assay(cd,"counts",breaks=100), main='', xlab='Cells per condition per hypersphere')
+head(intensities(cd))
+```
+
+## Preparing for the DA analysis
+
+We consider only hyperspheres with 50 or more cells on average (as defined using functions from the edgeR package).
+This avoids analyzing hyperspheres with very low cell counts, which are underpowered and are generally less interesting anyway, while still allowing detection of phenotypes that encompass less than 1% of the population.
+
+```{r}
+library(edgeR)
+y <- DGEList(assay(cd), lib.size=cd$totals)
+keep <- aveLogCPM(y) >= aveLogCPM(50, mean(cd$totals)) ## line from Aaron Lun
+table(keep)
+cd2 <- cd[keep,]
+y <- y[keep,]
+```
+
+We can create an MDS plot to visualize the differences between samples by condition and time.
+
+```{r}
+## check sample names in y are also in samples dataframe
+rownames(y$samples) %in% samples[,1]
+## subest/reorder samples
+samples <- samples[rownames(y$samples),]
+
+## plot
+adjc <- edgeR::cpm(y, log=TRUE, prior.count=3)
+col <- c("grey", "red", "green3", "blue", "black")[factor(samples$Condition, 
+                                                          levels=c('Unstimulated', 'N4' ,'T4', 'G4', 'NP68'))]
+plotMDS(adjc, col=col, labels=as.character(samples$Time.Point))
+```
+
+## Modelling biological variability
+
+We are going to compare variability between each peptide at each timepoint versus unstimulated cells in an ANOVA-like analysis.
+
+We use an additive model that accounts for the peptide at each time-point and blocks on the biological replicate of origin for each sample. Because we do not assume that there will be shared kinetics across peptides, we treat each stimulation condition as completely separate.
+
+```{r}
+peptide_time<-factor(paste0(samples$Condition, '_', as.character(samples$Time.Point)), levels=c('Unstimulated_0', 'NP68_1', 'NP68_2', 'NP68_4', 'NP68_6', 'G4_1', 'G4_2', 'G4_4', 'G4_6', 'T4_1', 'T4_2', 'T4_4', 'T4_6', 'N4_1', 'N4_2', 'N4_4', 'N4_6'))
+mouse <- factor(samples$Rep)
+design <- model.matrix(~ 0 + mouse + peptide_time)
+design
+```
+
+We then model biological variability using the quasi-likelihood framework in edgeR package.
+This estimates two "dispersion" parameters - the first to model the mean-dispersion trend, the second to model variation around the trend. We also use a robust fit.
+
+```{r}
+y <- estimateDisp(y, design)
+plotBCV(y)
+fit <- glmQLFit(y, design, robust=TRUE)
+plotQLDisp(fit)
+```
+
+## Testing for changes in abundance
+
+Our aim here is to identify hyperspheres that exhibit any changes in abundance with respect to unstimulated cells.
+
+```{r}
+res.all <- glmQLFTest(fit, coef = c(3:18))
+head(res.all$table)    
+```
+
+Finally, we need to correct for multiple testing by controlling the false discovery rate (FDR).
+However, hyperspheres are not evenly distributed across the high-dimensional intensity space.
+More hyperspheres will be observed in highly abundant subpopulations, due to the manner in which hyperspheres are formed (by centering them on existing cells).
+
+We want to control the FDR across the intensity space, regardless of cell density.
+This involves the notion of a "spatial FDR", which can be computed and controlled below a threshold, e.g., of 5%.
+In other words, of the volume of space that involves changes in abundance, 5% of that volume are false positives.
+
+```{r}
+qval.all <- spatialFDR(intensities(cd2), res.all$table$PValue)
+is.sig.all <- qval.all <= 0.05
+summary(is.sig.all)
+```
+
+# Saving the results
+
+```{r}
+## write the processed files as fcs files
+system('mkdir data/processed')
+for(i in 1:length(processed)){
+  write.FCS(processed[[i]], filename=paste0('data/processed/processed_singlet_activation_', rownames(processed@phenoData)[i]))
+}
+
+## save the other results of interest for future analyses
+save(list=c('cd', 'cd2', 'channels', 'is.sig.all', 'keep', 'in.use.2', 'qval.all', 'res.all', 'samples', 'lgcl'), file='data/cydar_results_singlet_activation.RData')
+```
+
+# Wrapping up
+
+```{r}
+sessionInfo()
+```

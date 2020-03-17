@@ -1,0 +1,154 @@
+---
+title: Plots for 6-hour timecourse mass cytometry data after differential abundance analysis
+author: Arianne Richard and Claire Ma
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Visualizing the data
+
+First we load the data.
+
+```{r}
+library(cydar)
+load('data/cydar_results_singlet_activation.RData')
+```
+
+## Creating dimensionality reduction plots
+
+We'll create a tSNE plot of the DA hyperspheres.
+
+```{r}
+set.seed(100)
+library(Rtsne)
+t.out <- Rtsne(intensities(cd2), perplexity=30) 
+head(t.out$Y)
+```
+
+We can then colour the coordinates by the desired log-fold-changes. 
+
+## ANOVA-like comparison
+
+Only the hyperspheres with significant changes at any time points are shown here. We've maxed out the logFC at 6 in order to be able to see the subtle changes since many of the changes are VERY large, going from no activated cells to mostly activated cells.
+
+```{r}
+png('data/DA_tSNE.png',height=9, width = 10, units="in", res=200)
+layout(cbind(matrix(c(1:16), nrow=4),17), widths=c(4, 4, 4, 4, 1))
+par(mar=c(2.1, 2.1, 2.1, 1.1), oma=c(3,3,1,1), mgp=c(2.2,1,0))
+pt <- c('NP68_1', 'G4_1', 'T4_1', 'N4_1', 'NP68_2', 'G4_2', 'T4_2', 'N4_2', 'NP68_4', 'G4_4', 'T4_4', 'N4_4', 'NP68_6', 'G4_6', 'T4_6', 'N4_6')
+
+for(peptide_time in pt){
+    fc.col <- plotSphereLogFC(t.out$Y[is.sig.all,1], t.out$Y[is.sig.all,2], 
+	    logFC=res.all$table[is.sig.all,paste0("logFC.peptide_time",peptide_time)],
+        max.logFC=6, cex.axis=1.5, cex.lab=1.5, cex.main=1.5, cex=1, main=paste0(peptide_time, 'h'))
+}
+par(mar=c(0,0,0,0))
+plot(0,0, axes=FALSE, xlab="", ylab="")
+createColorBar(fc.col)
+dev.off()
+```
+
+To annotate them, we will make similar plots coloured by the intensity of all relevant markers.
+
+```{r}
+png("data/DA_tSNE_intensities.png",height=9, width = 10, units="in", res=200)
+par(oma=c(4.1,4.1,1.1,1.1))
+lmat <- cbind(matrix(seq_len(4*4), ncol=4), 17)
+layout(lmat, widths=c(rep(4, 4), 1))
+
+reranges <- intensityRanges(cd2)
+par(mar=c(2.1, 2.1, 2.1, 2.1))
+
+for (i in order(markernames(cd2))) {
+    int.col <- plotSphereIntensity(t.out$Y[is.sig.all,1], t.out$Y[is.sig.all,2], 
+        intensities(cd2)[is.sig.all,i], irange=reranges[,i], 
+        main=markernames(cd2)[i], 
+        cex=1, cex.lab=1.5, cex.main=1.5, cex.axis=1.5)
+}
+
+# just filling up the leftover panels. 
+for (j in seq_len(16-ncol(intensities(cd2)))) { plot.new() } 
+
+par(mar=c(0,0,0,0))
+plot(0,0, type="n", axes=FALSE, ylab="", xlab="")
+createColorBar(int.col, top.text="High", bottom.text="Low")
+dev.off()
+```
+
+An alternative visualization strategy is to create heatmaps for each hypersphere.
+First we add some row names to our intensity matrix (otherwise `pheatmap()` becomes quite unhappy).
+
+```{r}
+library(pheatmap)
+mat <- intensities(cd2)
+rownames(mat) <- seq_len(nrow(mat)) 
+```
+
+We indicate whether each hypersphere was significant, and if so the direction in which its abundance changed for each condition versus unstimulated cells.
+
+```{r}
+ptr <- rev(pt)
+
+statuses <- list()
+for (i in 1:length(ptr)) {
+  coln <- paste0("logFC.peptide_time",ptr[i])
+  cur.lfc <- res.all$table[,coln]
+  cur.sign <- rep('small_change', length(cur.lfc))
+  cur.sign[cur.lfc > 6] <- 'more_than_6'
+  cur.sign[(cur.lfc <= 6) & (cur.lfc > 4)] <- 'more_than_4'
+  cur.sign[(cur.lfc <= 4) & (cur.lfc > 2)] <- 'more_than_2'
+  cur.sign[cur.lfc < -6] <- 'less_than_n6'
+  cur.sign[(cur.lfc >= -6) & (cur.lfc < -4)] <- 'less_than_n4'
+  cur.sign[(cur.lfc >= -4) & (cur.lfc < -2)] <- 'less_than_n2'
+  cur.sign[!is.sig.all] <- "ns"
+  statuses[[i]] <- cur.sign
+}
+
+names(statuses) <- ptr
+
+library(RColorBrewer)
+cols <- colorRampPalette(c("red", "pink", "lightgray","lightblue", "blue"))(7)
+
+# Adding colors for each status.
+fc.colors <- c(more_than_6=cols[1], more_than_4=cols[2], more_than_2=cols[3], small_change=cols[4], less_than_n2=cols[5], less_than_n4=cols[6], less_than_n6=cols[7], ns='gray30')
+fc.colors <- rep(list(fc.colors), length(statuses))
+names(fc.colors) <- names(statuses)    
+```
+
+Finally, we create a heatmap using pheatmap and clustering the marker intensities within the hyperspheres by Pearson corrleation or Euclidean distance.
+
+```{r}
+set.seed(100)
+pdf("data/DA_heatmap_correlation.pdf", height=10, width=7)
+pheatmap(mat,
+         clustering_distance_rows="correlation",
+         clustering_distance_columns="correlation",
+         col=viridis::viridis(101),
+         cluster_cols=TRUE,
+         annotation_row=do.call(data.frame, statuses),
+         annotation_color=fc.colors,
+         show_rownames=FALSE)
+dev.off()
+
+set.seed(100)
+pdf("data/DA_heatmap_euclidean.pdf", height=10, width=7)
+pheatmap(mat,
+         clustering_distance_rows="euclidean",
+         clustering_distance_columns="euclidean",
+         col=viridis::viridis(101),
+         cluster_cols=TRUE,
+         annotation_row=do.call(data.frame, statuses),
+         annotation_color=fc.colors,
+         show_rownames=FALSE)
+dev.off()
+```
+
+# Wrapping up
+
+```{r}
+sessionInfo()
+```

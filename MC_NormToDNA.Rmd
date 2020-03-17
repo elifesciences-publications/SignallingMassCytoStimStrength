@@ -1,0 +1,91 @@
+---
+title: Normalization of signalling proteins to DNA content
+author: Arianne Richard and Claire Ma, with some code adapted from Aaron Lun
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r, echo=FALSE, results="hide"}
+knitr::opts_chunk$set(error=FALSE, warning=FALSE, message=FALSE)
+```
+
+# Overview
+
+This script will build upon basic processing of the altered peptide ligand affinity mass cytometry data by normalizing each phosphorylated protein intensity to the intensity of the DNA measurement in each cell. This should correct for doublets but still allow for protein variability within each cell.
+
+We start from a filtered, pre-gated dataset of fcs files.  Uncomment the line below and load the appropriate dataset.
+
+# Loading the data
+
+First we load the libraries and the data, narrowing channels to those with named markers for ease. 
+
+```{r}
+library(ncdfFlow)
+library(cydar)
+#fnames <- list.files(path=<directory with .fcs files>, pattern='.fcs', full.names=TRUE)
+processed<-read.ncdfFlowSet(files = fnames)
+
+channels <- data.frame(channel=colnames(processed), 
+    marker=parameters(processed[[1]])$desc, 
+    stringsAsFactors=FALSE)
+channels
+in.use <- grepl("^[0-9]+[A-Za-z]+_", channels$marker)
+channels[in.use,]
+processed <- processed[,in.use]
+
+```
+
+# Normalizing signalling proteins to event DNA content
+
+Now we will see what happens when we normalize the phosphorylated protein intensites on a per cell basis to the total DNA intensity.
+
+We want to compute a ratio between the phosphorylated protein and the DNA levels. To maintain the scale similar to that measured by the antibodies for visualization, we'll multiply each phospho/DNA ratio by the median total DNA intensity measured in a selected sample. We'll replace the phosphorylated protein measurement with this ratio.
+
+The function requires as input an ncdf FlowSet data object, a list of channels to normalize, the name of the DNA channel to which we will normalize the data, and the selected sample for post-normalization scaling.
+
+Uncomment the line running the function, enter parameters, and run.
+
+```{r}
+
+DNAnorm <- function(flowset, to_norm, DNA, scale_sample){
+  ## flowset = ncdfFlowSet object
+  ## to_norm = names of channels to normalize to DNA content
+  ## DNA = name of DNA channel for normalization
+  ## scale_sample = name of sample that will be used to scale output ratios 
+  ### so visually on same scale as normal antibody-measured intensities
+  colnames(flowset) <- as.character(parameters(flowset[[1]])$desc)
+  scalar <- flowset[[scale_sample]]
+  scalar_dna <- exprs(scalar)[,DNA]
+  for(i in 1:length(flowset)){
+    ff <- flowset[[i]]
+    for(j in 1:length(to_norm)){
+      pho <- exprs(ff)[,to_norm[j]]
+      dna <- exprs(ff)[,DNA]
+      rat <- ((pho)/(dna)) * median(scalar_dna)
+      exprs(ff)[,to_norm[j]] <- rat
+    }
+    flowset[[i]] <- ff
+  }
+  return(flowset)
+}
+
+  
+#processed <- DNAnorm(processed, <to_norm>, <DNA>, <scale_sample>)
+
+
+```
+
+# Writing the fcs files
+
+```{r}
+fn <- rownames(processed@phenoData)
+for(i in 1:length(processed)){
+  write.FCS(processed[[i]], filename=paste0('DNAnorm_', fn[i]))
+}
+```
+
+# Wrapping up
+
+```{r}
+sessionInfo()
+```

@@ -1,0 +1,573 @@
+---
+title: Comparing trajectories of cells stimulated with different ligands in 0, 1, 2h time-course experiment
+author: Arianne Richard
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+````{r, echo=FALSE, results="hide"}
+knitr::opts_chunk$set(error=FALSE, warning=FALSE, message=FALSE)
+````
+
+# Overview
+
+This script will take a look at the single-cell trajectories that emerge out of mass cytometry signalling data of cells stimulated with different affinity ligands (N4, T4 and G4) for different lengths of time (0, 1, and 2 hours). We will pool together all cells from each biological replicate that were stimulated with the same ligand, order them by "activation status" using pS6 as a proxy, and then look at the emergence of other signalling events.  Finally we will compare the order of signalling events across ligands.
+
+# Loading the data
+
+First we load the libraries and the data for each biological replicate stained and run within a single tube. We will narrow channels to those with useful markers. 
+
+```{r}
+library(flowCore)
+library(cydar)
+
+library(ncdfFlow)
+fnames<-list.files(path = 'data1',pattern = '*.fcs',full.names=TRUE)
+ncdf<-read.ncdfFlowSet(files = fnames)
+
+channels <- data.frame(channel=colnames(ncdf), 
+    marker=parameters(ncdf[[1]])$desc, 
+    stringsAsFactors=FALSE)
+channels
+in.use <- grepl("^[0-9]+[A-Za-z]+_", channels$marker)
+in.use[grepl('Ce14', colnames(ncdf))] <- TRUE
+in.use[grepl('Event', colnames(ncdf))] <- TRUE
+channels[in.use,]
+
+ncdf <- ncdf[,in.use]
+lgcl<-logicleTransform(w=0.1,t=10000) 
+trans<-transformList(colnames(ncdf),lgcl)
+processed <- transform(ncdf, trans)
+
+samples <- read.table('data1/samples.txt', 
+    sep='\t', header=TRUE, stringsAsFactors=FALSE)
+samples
+
+## tubes/mice A and B only have 0 and 1 hour, while tubes/mice C and D have 0, 1 and 2 hours.  We'll only use C and D.
+
+# separate by tube (C versus D)
+processed.c<-processed[grep('_C_', rownames(phenoData(processed)))]
+processed.d<-processed[grep('_D_', rownames(phenoData(processed)))]
+
+
+```
+
+# Filtering the data
+
+We apply the same gates that we did for the cydar differential abundance analysis.  For a detailed annotation of each gate, see Timecourse_peptides_analysis.Rmd script. 
+
+This time, we'll gate each biological replicate separately because we don't have to merge them and therefore don't need to normalize. This means that some thresholds may be different in each replicate. We'll start with biological replicate C. 
+
+```{r}
+
+processed <- processed.c
+
+proc.ff <- poolCells(processed, equalize=FALSE)
+
+smoothScatter(exprs(proc.ff)[,"Ce140Di"], exprs(proc.ff)[,"Ce142Di"],
+    xlab="Ce140", ylab="Ce142")
+bead.gate <- rectangleGate(filterId="beadgate", list("Ce140Di"=c(3.2, Inf), "Ce142Di"=c(2, Inf)))
+smoothScatter(exprs(proc.ff)[,"Ce140Di"], exprs(proc.ff)[,"Ce142Di"],
+    xlab='Ce140', ylab='Ce142')
+abline(v=bead.gate@min['Ce140Di'], col="red")
+abline(h=bead.gate@min['Ce142Di'], col="red")
+bead.filt <- filter(proc.ff, bead.gate)
+proc.ff <- Subset(proc.ff, !bead.filt)
+nrow(proc.ff)
+
+hist(exprs(proc.ff)[,"Event_length"], breaks=200, xlab='Event length', main='')
+length.gate <- rectangleGate(filterId="lengthgate", list("Event_length"=c(0, 1.97)))
+hist(exprs(proc.ff)[,"Event_length"], breaks=200, xlab='Event length', main='')
+abline(v=length.gate@max, col="red")
+proc.ff <- Subset(proc.ff, length.gate)
+hist(exprs(proc.ff)[,"Event_length"], breaks=200, xlab='Event length', main='')
+nrow(proc.ff)
+
+smoothScatter(exprs(proc.ff)[,"Ir191Di"], exprs(proc.ff)[,"Ir193Di"], 
+    xlab="DNA1", ylab="DNA2") 
+
+DNA.gate <- rectangleGate(filterId="dnagate", list("Ir191Di"=c(3.25, 3.57), "Ir193Di"=c(3.55, 3.83)))
+
+hist(exprs(proc.ff)[,"Ir191Di"], breaks=200, xlab='DNA', main='')
+abline(v=DNA.gate@min['Ir191Di'], col='red')
+abline(v=DNA.gate@max['Ir191Di'], col='red')
+
+hist(exprs(proc.ff)[,"Ir193Di"], breaks=200, xlab='DNA', main='')
+abline(v=DNA.gate@min['Ir193Di'], col='red')
+abline(v=DNA.gate@max['Ir193Di'], col='red')
+
+
+proc.ff <- Subset(proc.ff, DNA.gate)
+nrow(proc.ff)
+smoothScatter(exprs(proc.ff)[,"Ir191Di"], exprs(proc.ff)[,"Ir193Di"], 
+    xlab="DNA1", ylab="DNA2") 
+
+hist(exprs(proc.ff)[,"Pt195Di"], breaks=200, xlab='Pt195', ylim=c(0,100000), main='')
+dead.gate <- rectangleGate(filterId="deadgate", list("Pt195Di"=c(0, 1.4)))
+hist(exprs(proc.ff)[,"Pt195Di"], breaks=200, xlab='Pt195', main='')
+abline(v=dead.gate@max, col="red")
+proc.ff <- Subset(proc.ff, dead.gate)
+hist(exprs(proc.ff)[,"Pt195Di"], breaks=200, xlab='Pt195', main='')
+nrow(proc.ff)
+
+hist(exprs(proc.ff)[,"Tm169Di"], breaks=200, xlab='TcRb', main='')
+t.gate <- outlierGate(proc.ff, 'Tm169Di', nmads=6, type='lower')
+abline(v=t.gate@min, col="red")
+proc.ff <- Subset(proc.ff, t.gate)
+
+hist(exprs(proc.ff)[,"Tm169Di"], breaks=200, xlab='TcRb', main='')
+nrow(proc.ff)
+
+hist(exprs(proc.ff)[,"Nd146Di"], breaks=200, xlab='CD8a', main='')
+CD8.gate <- outlierGate(proc.ff, 'Nd146Di', nmads=5, type='lower')
+abline(v=CD8.gate@min, col="red")
+proc.ff <- Subset(proc.ff, CD8.gate)
+
+hist(exprs(proc.ff)[,"Nd146Di"], breaks=200, xlab='CD8a', main='')
+nrow(proc.ff)
+
+bead.filt <- filter(processed, bead.gate)
+processed <- split(processed, bead.filt)["beadgate-"][[1]]
+plot(exprs(processed[[2]])[,"Ce140Di"], exprs(processed[[2]])[,"Ce142Di"],
+    xlab="Ce140", ylab="Ce142")
+
+processed <- Subset(processed, length.gate)
+hist(exprs(processed[[2]])[,"Event_length"], breaks=50, xlab='Event length', main='')
+
+processed <- Subset(processed, DNA.gate)
+smoothScatter(exprs(processed[[2]])[,"Ir191Di"], exprs(processed[[2]])[,"Ir193Di"], 
+    xlab="DNA1", ylab="DNA2") 
+
+processed <- Subset(processed, dead.gate)
+hist(exprs(processed[[2]])[,"Pt195Di"], breaks=50, xlab='Pt195', main='')
+
+processed <- Subset(processed, t.gate)
+hist(exprs(processed[[2]])[,"Tm169Di"], breaks=50, xlab='TCRb', main='')
+
+processed <- Subset(processed, CD8.gate)
+hist(exprs(processed[[2]])[,"Nd146Di"], breaks=50, xlab='CD8a', main='')
+
+processed.c <- processed
+
+
+```
+
+And repeat for replicate D.
+
+```{r}
+
+processed <- processed.d
+
+proc.ff <- poolCells(processed, equalize=FALSE)
+
+smoothScatter(exprs(proc.ff)[,"Ce140Di"], exprs(proc.ff)[,"Ce142Di"],
+    xlab="Ce140", ylab="Ce142")
+bead.gate <- rectangleGate(filterId="beadgate", list("Ce140Di"=c(3.2, Inf), "Ce142Di"=c(2, Inf)))
+smoothScatter(exprs(proc.ff)[,"Ce140Di"], exprs(proc.ff)[,"Ce142Di"],
+    xlab='Ce140', ylab='Ce142')
+abline(v=bead.gate@min['Ce140Di'], col="red")
+abline(h=bead.gate@min['Ce142Di'], col="red")
+bead.filt <- filter(proc.ff, bead.gate)
+proc.ff <- Subset(proc.ff, !bead.filt)
+nrow(proc.ff)
+
+hist(exprs(proc.ff)[,"Event_length"], breaks=200, xlab='Event length', main='')
+length.gate <- rectangleGate(filterId="lengthgate", list("Event_length"=c(0, 1.97)))
+hist(exprs(proc.ff)[,"Event_length"], breaks=200, xlab='Event length', main='')
+abline(v=length.gate@max, col="red")
+proc.ff <- Subset(proc.ff, length.gate)
+hist(exprs(proc.ff)[,"Event_length"], breaks=200, xlab='Event length', main='')
+nrow(proc.ff)
+
+smoothScatter(exprs(proc.ff)[,"Ir191Di"], exprs(proc.ff)[,"Ir193Di"], 
+    xlab="DNA1", ylab="DNA2") 
+
+DNA.gate <- rectangleGate(filterId="dnagate", list("Ir191Di"=c(3.25, 3.57), "Ir193Di"=c(3.55, 3.83)))
+
+hist(exprs(proc.ff)[,"Ir191Di"], breaks=200, xlab='DNA', main='')
+abline(v=DNA.gate@min['Ir191Di'], col='red')
+abline(v=DNA.gate@max['Ir191Di'], col='red')
+
+hist(exprs(proc.ff)[,"Ir193Di"], breaks=200, xlab='DNA', main='')
+abline(v=DNA.gate@min['Ir193Di'], col='red')
+abline(v=DNA.gate@max['Ir193Di'], col='red')
+
+
+proc.ff <- Subset(proc.ff, DNA.gate)
+nrow(proc.ff)
+smoothScatter(exprs(proc.ff)[,"Ir191Di"], exprs(proc.ff)[,"Ir193Di"], 
+    xlab="DNA1", ylab="DNA2") 
+
+hist(exprs(proc.ff)[,"Pt195Di"], breaks=200, xlab='Pt195', ylim=c(0,100000), main='')
+## very strange periodicity for Pt195 in this sample
+dead.gate <- rectangleGate(filterId="deadgate", list("Pt195Di"=c(0, 1.4)))
+hist(exprs(proc.ff)[,"Pt195Di"], breaks=200, xlab='Pt195', main='')
+abline(v=dead.gate@max, col="red")
+proc.ff <- Subset(proc.ff, dead.gate)
+hist(exprs(proc.ff)[,"Pt195Di"], breaks=200, xlab='Pt195', main='')
+nrow(proc.ff)
+
+hist(exprs(proc.ff)[,"Tm169Di"], breaks=200, xlab='TcRb', main='')
+## and a strangely long tail for TCRb
+
+## check relationship between those
+smoothScatter(exprs(proc.ff)[,"Pt195Di"], exprs(proc.ff)[,"Tm169Di"],
+    xlab="Pt195", ylab="TCRb")
+## nothing really of note
+
+## we'll extend the TCRb tail here to encompass cells that have recently activated and downregulated TCRb
+hist(exprs(proc.ff)[,"Tm169Di"], breaks=200, xlab='TcRb', main='')
+t.gate <- outlierGate(proc.ff, 'Tm169Di', nmads=8, type='lower')
+abline(v=t.gate@min, col="red")
+proc.ff <- Subset(proc.ff, t.gate)
+
+hist(exprs(proc.ff)[,"Tm169Di"], breaks=200, xlab='TcRb', main='')
+nrow(proc.ff)
+
+hist(exprs(proc.ff)[,"Nd146Di"], breaks=200, xlab='CD8a', main='')
+CD8.gate <- outlierGate(proc.ff, 'Nd146Di', nmads=5, type='lower')
+abline(v=CD8.gate@min, col="red")
+proc.ff <- Subset(proc.ff, CD8.gate)
+
+hist(exprs(proc.ff)[,"Nd146Di"], breaks=200, xlab='CD8a', main='')
+nrow(proc.ff)
+
+bead.filt <- filter(processed, bead.gate)
+processed <- split(processed, bead.filt)["beadgate-"][[1]]
+plot(exprs(processed[[2]])[,"Ce140Di"], exprs(processed[[2]])[,"Ce142Di"],
+    xlab="Ce140", ylab="Ce142")
+
+processed <- Subset(processed, length.gate)
+hist(exprs(processed[[2]])[,"Event_length"], breaks=50, xlab='Event length', main='')
+
+processed <- Subset(processed, DNA.gate)
+smoothScatter(exprs(processed[[2]])[,"Ir191Di"], exprs(processed[[2]])[,"Ir193Di"], 
+    xlab="DNA1", ylab="DNA2") 
+
+processed <- Subset(processed, dead.gate)
+hist(exprs(processed[[2]])[,"Pt195Di"], breaks=50, xlab='Pt195', main='')
+
+processed <- Subset(processed, t.gate)
+hist(exprs(processed[[2]])[,"Tm169Di"], breaks=50, xlab='TCRb', main='')
+
+processed <- Subset(processed, CD8.gate)
+hist(exprs(processed[[2]])[,"Nd146Di"], breaks=50, xlab='CD8a', main='')
+
+processed.d <- processed
+
+```
+
+# Merging timepoints for each condition and replicate
+
+Now we merge together all timepoints for each peptide stimulation within each replicate.
+
+```{r}
+
+rownames(samples) <- samples[,1]
+
+samples[rownames(phenoData(processed.c)),]
+processed.c.list <- split(rownames(phenoData(processed.c)),
+                          samples[rownames(phenoData(processed.c)),'Condition'])
+processed.c.list <- lapply(processed.c.list, 
+                           function(x){
+                             return(c(x, processed.c.list$Unstimulated))})
+processed.c.list <- lapply(processed.c.list,
+                           function(x){processed.c[rownames(phenoData(processed.c)) %in% x]})
+processed.c.list <- lapply(processed.c.list,
+                           function(x){
+                             return(x[order(samples[phenoData(x)$name,'Time.Point']),])
+                           })
+
+pooled.c.list <- lapply(processed.c.list[c('N4', 'T4', 'G4')], 
+                        function(x){poolCells(x, equalize=TRUE)})
+
+samples[rownames(phenoData(processed.d)),]
+processed.d.list <- split(rownames(phenoData(processed.d)),
+                          samples[rownames(phenoData(processed.d)),'Condition'])
+processed.d.list <- lapply(processed.d.list, 
+                           function(x){
+                             return(c(x, processed.d.list$Unstimulated))})
+processed.d.list <- lapply(processed.d.list,
+                           function(x){processed.d[rownames(phenoData(processed.d)) %in% x]})
+processed.d.list <- lapply(processed.d.list,
+                           function(x){
+                             return(x[order(samples[phenoData(x)$name,'Time.Point']),])
+                           })
+
+pooled.d.list <- lapply(processed.d.list[c('N4', 'T4', 'G4')], 
+                        function(x){poolCells(x, equalize=TRUE)})
+```
+
+# Ordering the cells
+
+Now we want to order the cells within each of these lists by the pS6 detected.  This marker was chosen as it increases over the course of stimulation both in terms of the percentage of positive cells and the intensity within individual cells.
+
+```{r}
+
+pS6 <- channels$channel[grep('pS6', channels$marker)]
+
+col.c.list <- lapply(pooled.c.list, function(x){
+  return(rep(c(1:3), each=nrow(x)/3)[order(exprs(x)[,pS6])])
+})
+
+pooled.c.list <- lapply(pooled.c.list, function(x){
+  return(exprs(x)[order(exprs(x)[,pS6]),])
+})
+
+col.d.list <- lapply(pooled.d.list, function(x){
+  return(rep(c(1:3), each=nrow(x)/3)[order(exprs(x)[,pS6])])
+})
+
+pooled.d.list <- lapply(pooled.d.list, function(x){
+  return(exprs(x)[order(exprs(x)[,pS6]),])
+})
+
+lapply(pooled.c.list, nrow)
+lapply(pooled.d.list, nrow)
+
+```
+
+Now we look at the trajectories we've created in terms of pS6 expression.
+
+```{r}
+
+library(dplyr)
+
+## define basic plotting function
+plot_trajectory <- function(ordered_exprs_df, channel, downsample, color, ...){
+  set.seed(100) ## for reproducibility
+  rand_indexes <- sample(c(1:nrow(ordered_exprs_df)), downsample, replace=FALSE)
+  rand_indexes <- rand_indexes[order(rand_indexes)]
+  dsdf <- data.frame(ordered_exprs_df)[rand_indexes,channel]
+  plot(c(1:length(dsdf)), dsdf, pch=1, cex=0.5, col=color[rand_indexes],
+       xlab='ordered cells', ...)
+}
+
+## plot for each replicate and each peptide
+for(i in 1:length(pooled.c.list)){
+  png(paste0('data1/Trajectory_c_pS6_', names(pooled.c.list)[i], '.png'), height=4, width=4, units="in", res=200)
+  plot_trajectory(pooled.c.list[[i]], pS6, 1000, 
+                  c('darkgreen', 'purple', 'orange')[col.c.list[[i]]], 
+                  main=names(pooled.c.list)[i], ylab='pS6 intensity')
+  legend('topleft', legend=c('0h', '1h', '2h'), pch=1,
+         col=c('darkgreen', 'purple', 'orange'), bty='n')
+  dev.off()
+}
+
+for(i in 1:length(pooled.d.list)){
+  png(paste0('data1/Trajectory_d_pS6_', names(pooled.d.list)[i], '.png'), height=4, width=4, units="in", res=200)
+  plot_trajectory(pooled.d.list[[i]], pS6, 1000, 
+                  c('darkgreen', 'purple', 'orange')[col.d.list[[i]]],
+                  main=names(pooled.d.list)[i], ylab='pS6 intensity')
+  legend('topleft', legend=c('0h', '1h', '2h'), pch=1,
+         col=c('darkgreen', 'purple', 'orange'), bty='n')
+  dev.off()
+}
+
+```
+
+What about other markers? We'll look at pERK1/2 as an example.
+
+```{r}
+
+pERK <- channels$channel[grep('pERK', channels$marker)]
+
+for(i in 1:length(pooled.c.list)){
+png(paste0('data1/Trajectory_c_pERK_', names(pooled.c.list)[i], '.png'), height=4, width=4, units="in", res=200)
+  plot_trajectory(pooled.c.list[[i]], pERK, 1000, 
+                  rep('grey50', times=nrow(pooled.c.list[[i]])), 
+                  main=names(pooled.c.list)[i], ylab='pERK intensity')
+dev.off()
+}
+
+for(i in 1:length(pooled.d.list)){
+  png(paste0('data1/Trajectory_d_pERK_', names(pooled.d.list)[i], '.png'), height=4, width=4, units="in", res=200)
+  plot_trajectory(pooled.d.list[[i]], pERK, 1000, 
+                  rep('grey50', times=nrow(pooled.d.list[[i]])), 
+                  main=names(pooled.d.list)[i], ylab='pERK intensity')
+  dev.off()
+}
+
+```
+
+# Examination of multiple signalling events at the same time
+
+Now we apply a modified version of this trajectory plotting function to a group of markers to look at their expression profiles with respect to this cell order by fitting a loess curve. 
+
+```{r}
+
+## modified plotting function
+plot_trajectory2 <- function(ordered_exprs_df, ref_channel, channels, colors, downsample){
+  set.seed(100)
+  rand_indexes <- sample(c(1:nrow(ordered_exprs_df)), downsample, replace=FALSE)
+  rand_indexes <- rand_indexes[order(rand_indexes)]
+  dsdf <- data.frame(ordered_exprs_df)[rand_indexes,ref_channel]
+  plx <- predict(loess(dsdf~c(1:length(dsdf)), span=0.2), se=TRUE)
+  plot(c(1:length(dsdf)), dsdf, pch=20, col='white',
+       xlab='ordered cells', ylab='intensity', ylim=c(0,4))
+  lines(c(1:length(dsdf)), plx$fit, col='black', lwd=2)
+
+  for(i in 1:length(channels)){
+    dsdf <- data.frame(ordered_exprs_df)[rand_indexes,channels[i]]
+    plx <- predict(loess(dsdf~c(1:length(dsdf)), span=0.5), se=TRUE)
+    lines(c(1:length(dsdf)), plx$fit, col=colors[i], lwd=2)
+    lines(c(1:length(dsdf)), plx$fit+2*plx$s, lty=3, lwd=1.5, col=colors[i])
+    lines(c(1:length(dsdf)), plx$fit-2*plx$s, lty=3, lwd=1.5, col=colors[i])
+  }
+}
+
+# pick channels to plot from Figure 5
+chplot <- channels$channel[c(grep('pERK', channels$marker), grep('pSTAT5', channels$marker),grep('CD44', channels$marker))]
+
+cols <- c('magenta', 'turquoise4', 'slateblue')
+
+# make trajectory plots for each replicate and each peptide
+for(i in 1:length(pooled.c.list)){
+  png(paste0('data1/Trajectory_c_F5_', names(pooled.c.list)[i], '.png'), height=4, width=4, units="in", res=200)
+  plot_trajectory2(pooled.c.list[[i]], pS6, chplot, cols, 2000)
+  legend('topleft', legend=c('pS6', 'pERK', 'pSTAT5', 'CD44'), pch=20,
+         col=c('black', cols), bty='n')
+  dev.off()
+}
+
+for(i in 1:length(pooled.d.list)){
+  png(paste0('data1/Trajectory_d_F5_', names(pooled.d.list)[i], '.png'), height=4, width=4, units="in", res=200)
+  plot_trajectory2(pooled.d.list[[i]], pS6, chplot, cols, 2000)
+  legend('topleft', legend=c('pS6', 'pERK', 'pSTAT5', 'CD44'), pch=20,
+         col=c('black', cols), bty='n')
+  dev.off()
+}
+
+## and do the same for an even wider range of markers
+chplot <- channels$channel[c(grep('pERK', channels$marker), grep('pSTAT5', channels$marker),grep('IkBa', channels$marker), grep('pAKT', channels$marker), grep('pLCK', channels$marker))]
+
+cols <- c('magenta', 'turquoise4', 'slateblue', 'darkorange', 'grey50')
+
+for(i in 1:length(pooled.c.list)){
+  png(paste0('data1/Trajectory_c_signalling_', names(pooled.c.list)[i], '.png'), 
+      height=4, width=4, units="in", res=200)
+  plot_trajectory2(pooled.c.list[[i]], pS6, chplot, cols, 2000)
+  legend('topleft', legend=c('pS6', 'pERK', 'pSTAT5', 'IkBa', 'pAKT', 'pLCK'), pch=20,
+         col=c('black', cols), bty='n')
+  dev.off()
+}
+
+for(i in 1:length(pooled.d.list)){
+  png(paste0('data1/Trajectory_d_signalling_', names(pooled.d.list)[i], '.png'), 
+      height=4, width=4, units="in", res=200)
+  plot_trajectory2(pooled.d.list[[i]], pS6, chplot, cols, 2000)
+  legend('topleft', legend=c('pS6', 'pERK', 'pSTAT5', 'IkBa', 'pAKT', 'pLCK'), pch=20,
+         col=c('black', cols), bty='n')
+  dev.off()
+}
+
+
+
+
+```
+
+# Statistical comparison of signalling order
+
+Now we want to know whether the order of signalling events is conserved across the different stimuli. For this, we'll define threshold to declare that a marker has changed. 
+
+The threshold is the first sliding window of 5% of cells whose average intensity of the marker is at least 1 standard deviation away from the average intensity of the marker in the first 5% of ordered cells.
+
+```{r}
+
+# we define a function that allows us to look at markers whose intensity varies in any direction, or one (up or down) direction specifically
+marker_on <- function(ordered_exprs_df, channels, direction = c('both', 'up', 'down'), downsample=5000, wind=0.05, slide=0.01){
+  set.seed(100)
+  rand_indexes <- sample(c(1:nrow(ordered_exprs_df)), downsample, replace=FALSE)
+  rand_indexes <- rand_indexes[order(rand_indexes)]
+  dsdf <- data.frame(ordered_exprs_df)[rand_indexes,]
+  n <- nrow(dsdf)
+  wind_start <- seq(0, n-(wind*n), by=slide*n)
+  wind_avgs <- lapply(wind_start, function(x){
+    apply(dsdf[c(x:(x+wind*n)),channels], 2, mean)
+  })
+  wind_avgs <- do.call('rbind', wind_avgs)
+  # print some data to check things going well
+  print(wind_avgs[c(1:5, (nrow(wind_avgs)-5):nrow(wind_avgs)),])
+  wind_sds <- lapply(wind_start, function(x){
+    apply(dsdf[c(x:(x+wind*n)),channels], 2, sd)
+  })
+  wind_sds <- do.call('rbind', wind_sds)
+  # print some data to check things going well
+  print(wind_sds[c(1:5, (nrow(wind_sds)-5):nrow(wind_sds)),])
+  wind_on <- vector('numeric', ncol(wind_avgs))
+  for(i in 1:ncol(wind_avgs)){
+    if(length(direction) > 1){
+      direction <- direction[1]
+    }
+    if(direction == 'both'){
+      inds <- which(
+      (wind_avgs[,i] > (wind_avgs[1,i]+1*wind_sds[1,i])) |
+        (wind_avgs[,i] < (wind_avgs[1,i]-1*wind_sds[1,i])))
+    }else if (direction == 'up'){
+      inds <- which(wind_avgs[,i] > (wind_avgs[1,i]+1*wind_sds[1,i]))
+    }else if (direction == 'down'){
+      inds <- which(wind_avgs[,i] < (wind_avgs[1,i]-1*wind_sds[1,i]))
+    }
+    if(length(inds) > 0){
+      wind_on[i] <-min(inds)
+    } else {
+      wind_on[i] <- NA
+    }
+  }
+  return(wind_on)
+}
+
+## pick the channels to examine from Figure 5
+chplot <- channels$channel[c(grep('pS6', channels$marker), grep('pERK', channels$marker), grep('pSTAT5', channels$marker),grep('CD44', channels$marker))]
+
+c_orders <- lapply(pooled.c.list, function(x){marker_on(x, chplot, direction='up')})
+c_orders <- do.call('rbind', c_orders)
+colnames(c_orders) <- chplot
+c_orders[which(is.na(c_orders))] <- Inf
+c_orders
+
+d_orders <- lapply(pooled.d.list, function(x){marker_on(x, chplot, direction='up')})
+d_orders <- do.call('rbind', d_orders)
+colnames(d_orders) <- chplot
+d_orders[which(is.na(d_orders))] <- Inf
+d_orders
+
+## check that these are the same if we were to allow "both" directions (that no marker is actually going down first)
+c_orders <- lapply(pooled.c.list, function(x){marker_on(x, chplot, direction='up')})
+c_orders <- do.call('rbind', c_orders)
+colnames(c_orders) <- chplot
+c_orders[which(is.na(c_orders))] <- Inf
+c_orders
+
+d_orders <- lapply(pooled.d.list, function(x){marker_on(x, chplot, direction='up')})
+d_orders <- do.call('rbind', d_orders)
+colnames(d_orders) <- chplot
+d_orders[which(is.na(d_orders))] <- Inf
+d_orders
+
+
+
+## and expand to more signalling markers
+chplot <- channels$channel[c(grep('pS6', channels$marker), grep('pERK', channels$marker), grep('pSTAT5', channels$marker),grep('IkBa', channels$marker), grep('pAKT', channels$marker), grep('pLCK', channels$marker))]
+
+c_orders2 <- lapply(pooled.c.list, function(x){marker_on(x, chplot, direction='both')})
+c_orders2 <- do.call('rbind', c_orders2)
+colnames(c_orders2) <- chplot
+c_orders2[which(is.na(c_orders2))] <- Inf
+c_orders2
+
+d_orders2 <- lapply(pooled.d.list, function(x){marker_on(x, chplot, direction='both')})
+d_orders2 <- do.call('rbind', d_orders2)
+colnames(d_orders2) <- chplot
+d_orders2[which(is.na(d_orders2))] <- Inf
+d_orders2
+
+```
+
+This has given us an order for each signalling event within each ligand stimulation for our selected markers pS6, pERK, pSTAT5 and CD44. Unfortunately, in this shortened time-course, it is not possible to order pSTAT5 and CD44. However, the ordering of pS6, pERK and pSTAT5/CD44 are the same across replicates and the same as was observed in the longer timecourse data set that extends to 6h.
+
+# Wrapping up
+
+```{r}
+sessionInfo()
+```
