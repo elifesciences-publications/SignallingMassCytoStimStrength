@@ -1,3 +1,7 @@
+This code is associated with the paper from Ma et al., Stimulation strength controls the rate of initiation but not the molecular organization of TCR-induced signalling. eLife, 2020. http://doi.org/10.7554/eLife.53948
+
+
+
 # SignallingCyTOFStimStrength
 
 This repo contains code for analysis of mass cytometry data looking at T cell signalling after stimulating with different ligands as described in Ma et al, 2020.
